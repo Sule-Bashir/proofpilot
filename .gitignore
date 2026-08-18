@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+venv/
+env/
+*.db
+*.sqlite
+*.sqlite3
+*.tmp
+*.log
+groq_models.json
+.DS_Store

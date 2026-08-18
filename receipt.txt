@@ -1,0 +1,12 @@
+ABC SUPERMARKET
+123 Main Street
+Lagos, Nigeria
+
+Items:
+- Notebook: ₦1,500
+- Pen: ₦500
+- Printer Paper: ₦2,000
+
+Total: ₦4,000
+Date: 18 Aug 2026
+Thank you for shopping!
