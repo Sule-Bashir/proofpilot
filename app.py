@@ -5,6 +5,7 @@ import io
 from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 from groq import Groq
@@ -30,6 +31,15 @@ app = FastAPI(
     title="ProofPilot API",
     description="AI-powered receipt processing agent with OCR",
     version="1.1.0"
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Database setup
@@ -84,14 +94,14 @@ def extract_text_from_file(content: bytes, filename: str) -> str:
     """Extract text from various file formats."""
     file_extension = filename.split('.')[-1].lower() if '.' in filename else ''
     text = ""
-    
+
     # Text files
     if file_extension in ['txt', 'csv', 'log']:
         try:
             text = content.decode('utf-8', errors='ignore')
         except:
             text = "Could not decode text file"
-    
+
     # PDF files
     elif file_extension in ['pdf']:
         if PDF_AVAILABLE:
@@ -107,7 +117,7 @@ def extract_text_from_file(content: bytes, filename: str) -> str:
                 text = "Could not extract text from PDF. It may be scanned or password protected."
         else:
             text = "PDF support not installed. Install: pip install pdfplumber"
-    
+
     # Image files
     elif file_extension in ['jpg', 'jpeg', 'png', 'bmp', 'tiff', 'webp']:
         if OCR_AVAILABLE:
@@ -120,7 +130,7 @@ def extract_text_from_file(content: bytes, filename: str) -> str:
                 text = "Could not extract text from image. Please upload a clearer photo."
         else:
             text = "OCR not installed. Please install: pip install pillow pytesseract"
-    
+
     # Unknown format - try as text
     else:
         try:
@@ -129,25 +139,25 @@ def extract_text_from_file(content: bytes, filename: str) -> str:
                 text = f"Unsupported file format: {file_extension}"
         except:
             text = f"Could not read file: {filename}"
-    
+
     return text
 
 @app.post("/process-receipt", response_model=ExpenseResponse)
 async def process_receipt(file: UploadFile = File(...)):
     """Process a receipt file (text, image, or PDF)."""
-    
+
     if not client:
         raise HTTPException(
             status_code=503,
             detail="GROQ_API_KEY not set. Please set it and restart the server."
         )
-    
+
     # Read file content
     content = await file.read()
-    
+
     # Extract text based on file type
     text = extract_text_from_file(content, file.filename)
-    
+
     # If text is empty or error message, return early
     if not text or len(text.strip()) < 5:
         return ExpenseResponse(
@@ -160,7 +170,7 @@ async def process_receipt(file: UploadFile = File(...)):
             filename=file.filename,
             message=f"Could not extract text from {file.filename}. Please upload a clear image or text file."
         )
-    
+
     # Build prompt for Groq
     prompt = f"""
     Extract information from this receipt and return ONLY valid JSON.
@@ -180,7 +190,7 @@ async def process_receipt(file: UploadFile = File(...)):
 
     ONLY return the JSON. No other text.
     """
-    
+
     try:
         # Call Groq API
         response = client.chat.completions.create(
@@ -192,7 +202,7 @@ async def process_receipt(file: UploadFile = File(...)):
             temperature=0.1,
             max_tokens=300
         )
-        
+
         # Parse response
         try:
             data = json.loads(response.choices[0].message.content)
@@ -206,7 +216,7 @@ async def process_receipt(file: UploadFile = File(...)):
                 "category": "Other",
                 "confidence": 0.5
             }
-            
+
     except Exception as e:
         print(f"❌ Error calling Groq: {e}")
         data = {
@@ -216,10 +226,10 @@ async def process_receipt(file: UploadFile = File(...)):
             "category": "Other",
             "confidence": 0.5
         }
-    
+
     # Determine status based on confidence
     status = "auto_approved" if data.get("confidence", 0) > 0.8 else "needs_review"
-    
+
     # Save to database
     try:
         conn = sqlite3.connect("expenses.db")
@@ -242,7 +252,7 @@ async def process_receipt(file: UploadFile = File(...)):
         print(f"✅ Saved expense: {data.get('vendor')} - {data.get('amount')} {data.get('currency')}")
     except Exception as e:
         print(f"❌ Error saving to database: {e}")
-    
+
     # Return response
     return ExpenseResponse(
         status=status,
@@ -262,13 +272,13 @@ async def get_expenses(limit: Optional[int] = 100):
     cursor = conn.cursor()
     cursor.execute("""
         SELECT id, vendor, amount, currency, category, confidence, status, filename, created_at
-        FROM expenses 
-        ORDER BY created_at DESC 
+        FROM expenses
+        ORDER BY created_at DESC
         LIMIT ?
     """, (limit,))
     rows = cursor.fetchall()
     conn.close()
-    
+
     expenses = []
     for row in rows:
         expenses.append({
@@ -282,7 +292,7 @@ async def get_expenses(limit: Optional[int] = 100):
             "filename": row[7],
             "created_at": row[8]
         })
-    
+
     return ExpenseListResponse(expenses=expenses, count=len(expenses))
 
 @app.get("/stats")
@@ -290,25 +300,25 @@ async def get_stats():
     """Get statistics about processed expenses."""
     conn = sqlite3.connect("expenses.db")
     cursor = conn.cursor()
-    
+
     cursor.execute("SELECT COUNT(*) FROM expenses")
     total = cursor.fetchone()[0]
-    
+
     cursor.execute("SELECT COUNT(*) FROM expenses WHERE status = 'auto_approved'")
     auto_approved = cursor.fetchone()[0]
-    
+
     cursor.execute("SELECT COUNT(*) FROM expenses WHERE status = 'needs_review'")
     needs_review = cursor.fetchone()[0]
-    
+
     cursor.execute("SELECT SUM(amount) FROM expenses")
     total_amount = cursor.fetchone()[0] or 0
-    
+
     # Count by category
     cursor.execute("SELECT category, COUNT(*) FROM expenses GROUP BY category")
     categories = {row[0]: row[1] for row in cursor.fetchall()}
-    
+
     conn.close()
-    
+
     return {
         "total_expenses": total,
         "auto_approved": auto_approved,
