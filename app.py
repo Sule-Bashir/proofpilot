@@ -2,6 +2,7 @@ import os
 import json
 import sqlite3
 import io
+import numpy as np
 from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
@@ -10,14 +11,17 @@ from pydantic import BaseModel
 from typing import List, Optional
 from groq import Groq
 
-# OCR and image processing
+# OCR and image processing with EasyOCR
 try:
-    import pytesseract
+    import easyocr
     from PIL import Image
+    # Initialize EasyOCR reader (runs once at startup)
+    reader = easyocr.Reader(['en'], gpu=False)
     OCR_AVAILABLE = True
+    print("✅ EasyOCR initialized")
 except ImportError:
     OCR_AVAILABLE = False
-    print("⚠️ OCR not available. Install: pip install pillow pytesseract")
+    print("⚠️ OCR not available. Install: pip install easyocr opencv-python-headless")
 
 # PDF processing
 try:
@@ -118,18 +122,23 @@ def extract_text_from_file(content: bytes, filename: str) -> str:
         else:
             text = "PDF support not installed. Install: pip install pdfplumber"
 
-    # Image files
+    # Image files - using EasyOCR
     elif file_extension in ['jpg', 'jpeg', 'png', 'bmp', 'tiff', 'webp']:
         if OCR_AVAILABLE:
             try:
                 image = Image.open(io.BytesIO(content))
-                text = pytesseract.image_to_string(image)
+                # Convert PIL image to numpy array
+                img_array = np.array(image)
+                # Use EasyOCR
+                results = reader.readtext(img_array)
+                # Combine all detected text
+                text = ' '.join([res[1] for res in results])
                 print(f"✅ OCR extracted {len(text)} characters from image")
             except Exception as e:
                 print(f"❌ OCR error: {e}")
                 text = "Could not extract text from image. Please upload a clearer photo."
         else:
-            text = "OCR not installed. Please install: pip install pillow pytesseract"
+            text = "OCR not installed. Please install: pip install easyocr opencv-python-headless"
 
     # Unknown format - try as text
     else:
@@ -367,7 +376,9 @@ async def test_ocr(file: UploadFile = File(...)):
     try:
         content = await file.read()
         image = Image.open(io.BytesIO(content))
-        text = pytesseract.image_to_string(image)
+        img_array = np.array(image)
+        results = reader.readtext(img_array)
+        text = ' '.join([res[1] for res in results])
         return {
             "ocr_text": text.strip(),
             "length": len(text),
