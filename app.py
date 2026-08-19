@@ -361,6 +361,21 @@ async def health_check():
         "timestamp": datetime.now().isoformat()
     }
 
+@app.post("/test-ocr")
+async def test_ocr(file: UploadFile = File(...)):
+    """Test OCR on a file."""
+    try:
+        content = await file.read()
+        image = Image.open(io.BytesIO(content))
+        text = pytesseract.image_to_string(image)
+        return {
+            "ocr_text": text.strip(),
+            "length": len(text),
+            "success": len(text.strip()) > 0
+        }
+    except Exception as e:
+        return {"error": str(e), "success": False}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
