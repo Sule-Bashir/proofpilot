@@ -9,3 +9,4 @@ env/
 *.log
 groq_models.json
 .DS_Store
+test_vision.py

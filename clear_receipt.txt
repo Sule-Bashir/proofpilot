@@ -1,0 +1,9 @@
+Digital Hub Store
+123 Tech Avenue, Lagos
+Date: 19 Aug 2026
+Item: Laptop Bag
+Price: ₦15,000
+Item: Mouse
+Price: ₦8,500
+TOTAL: ₦23,500
+Thank you!
