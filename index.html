@@ -321,9 +321,16 @@
 
     <script>
         // ============================================================
-        // 🔧 API URL - Set to your Render backend
+        // 🔧 API URL - Auto-detects local vs production
         // ============================================================
-        const API_URL = 'https://proofpilot-bpj6.onrender.com';
+        // If running on localhost or 127.0.0.1, use local backend
+        // Otherwise, use the Render backend
+        const isLocal = window.location.hostname === 'localhost' || 
+                        window.location.hostname === '127.0.0.1';
+        
+        const API_URL = isLocal 
+            ? 'http://127.0.0.1:8000' 
+            : 'https://proofpilot-bpj6.onrender.com';
         // ============================================================
 
         const fileInput = document.getElementById('fileInput');
@@ -416,8 +423,8 @@
 
                 // Show result
                 const statusClass = data.status === 'auto_approved' ? 'success' : 'warning';
-                const statusBadge = data.status === 'auto_approved' 
-                    ? '<span class="badge badge-auto">✅ Auto-Approved</span>' 
+                const statusBadge = data.status === 'auto_approved'
+                    ? '<span class="badge badge-auto">✅ Auto-Approved</span>'
                     : '<span class="badge badge-review">⚠️ Needs Review</span>';
 
                 resultDiv.className = 'result show ' + statusClass;

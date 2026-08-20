@@ -2,7 +2,8 @@ import os
 import json
 import sqlite3
 import io
-import numpy as np
+import base64
+import re
 from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
@@ -11,19 +12,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 from groq import Groq
 
-# OCR and image processing with EasyOCR
-try:
-    import easyocr
-    from PIL import Image
-    # Initialize EasyOCR reader (runs once at startup)
-    reader = easyocr.Reader(['en'], gpu=False)
-    OCR_AVAILABLE = True
-    print("✅ EasyOCR initialized")
-except ImportError:
-    OCR_AVAILABLE = False
-    print("⚠️ OCR not available. Install: pip install easyocr opencv-python-headless")
-
-# PDF processing
+# PDF processing (lightweight)
 try:
     import pdfplumber
     PDF_AVAILABLE = True
@@ -33,8 +22,8 @@ except ImportError:
 
 app = FastAPI(
     title="ProofPilot API",
-    description="AI-powered receipt processing agent with OCR",
-    version="1.1.0"
+    description="AI-powered receipt processing agent with Groq Vision",
+    version="2.0.0"
 )
 
 # CORS middleware
@@ -95,7 +84,7 @@ class ExpenseListResponse(BaseModel):
     count: int
 
 def extract_text_from_file(content: bytes, filename: str) -> str:
-    """Extract text from various file formats."""
+    """Extract text from text files and PDFs."""
     file_extension = filename.split('.')[-1].lower() if '.' in filename else ''
     text = ""
 
@@ -118,38 +107,104 @@ def extract_text_from_file(content: bytes, filename: str) -> str:
                 print(f"✅ PDF extracted {len(text)} characters")
             except Exception as e:
                 print(f"❌ PDF error: {e}")
-                text = "Could not extract text from PDF. It may be scanned or password protected."
+                text = ""
         else:
-            text = "PDF support not installed. Install: pip install pdfplumber"
-
-    # Image files - using EasyOCR
-    elif file_extension in ['jpg', 'jpeg', 'png', 'bmp', 'tiff', 'webp']:
-        if OCR_AVAILABLE:
-            try:
-                image = Image.open(io.BytesIO(content))
-                # Convert PIL image to numpy array
-                img_array = np.array(image)
-                # Use EasyOCR
-                results = reader.readtext(img_array)
-                # Combine all detected text
-                text = ' '.join([res[1] for res in results])
-                print(f"✅ OCR extracted {len(text)} characters from image")
-            except Exception as e:
-                print(f"❌ OCR error: {e}")
-                text = "Could not extract text from image. Please upload a clearer photo."
-        else:
-            text = "OCR not installed. Please install: pip install easyocr opencv-python-headless"
-
-    # Unknown format - try as text
-    else:
-        try:
-            text = content.decode('utf-8', errors='ignore')
-            if len(text.strip()) < 10:
-                text = f"Unsupported file format: {file_extension}"
-        except:
-            text = f"Could not read file: {filename}"
+            text = ""
 
     return text
+
+def process_image_with_groq(content: bytes, filename: str) -> dict:
+    """Process image using Groq Vision model."""
+    try:
+        # Encode image to base64
+        image_base64 = base64.b64encode(content).decode('utf-8')
+
+        # Determine MIME type
+        file_extension = filename.split('.')[-1].lower() if '.' in filename else ''
+        mime_type = {
+            'jpg': 'image/jpeg',
+            'jpeg': 'image/jpeg',
+            'png': 'image/png',
+            'gif': 'image/gif',
+            'webp': 'image/webp'
+        }.get(file_extension, 'image/jpeg')
+
+        # Build prompt for Groq Vision (EXACTLY like test_vision.py)
+        prompt = """
+        Extract receipt data from this image.
+        Return ONLY valid JSON. No explanation, no think tags, no other text.
+
+        Required JSON format:
+        {"vendor":"store name","amount":0.0,"currency":"NGN","category":"Office Supplies","confidence":0.9}
+
+        Categories: Food, Transport, Office Supplies, Utilities, Entertainment, Other.
+        """
+
+        # Call Groq Vision API
+        response = client.chat.completions.create(
+            model="qwen/qwen3.6-27b",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{mime_type};base64,{image_base64}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            temperature=0.1,
+            max_tokens=300
+        )
+
+        # Parse response - exactly like test_vision.py
+        result = response.choices[0].message.content
+        print(f"Raw response: {result[:200]}...")
+        
+        # Remove everything inside <think> tags
+        cleaned = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL)
+        # Remove any leftover tags
+        cleaned = re.sub(r'<[^>]+>', '', cleaned)
+        # Find JSON object
+        json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+        
+        if json_match:
+            try:
+                data = json.loads(json_match.group())
+                print(f"✅ Groq Vision parsed: {data}")
+                return data
+            except json.JSONDecodeError as e:
+                print(f"❌ JSON parse error: {e}")
+                return {
+                    "vendor": "Unknown",
+                    "amount": 0.0,
+                    "currency": "NGN",
+                    "category": "Other",
+                    "confidence": 0.5
+                }
+        else:
+            print(f"❌ No JSON found in response")
+            return {
+                "vendor": "Unknown",
+                "amount": 0.0,
+                "currency": "NGN",
+                "category": "Other",
+                "confidence": 0.5
+            }
+
+    except Exception as e:
+        print(f"❌ Groq Vision error: {e}")
+        return {
+            "vendor": "Unknown",
+            "amount": 0.0,
+            "currency": "NGN",
+            "category": "Other",
+            "confidence": 0.5
+        }
 
 @app.post("/process-receipt", response_model=ExpenseResponse)
 async def process_receipt(file: UploadFile = File(...)):
@@ -163,61 +218,77 @@ async def process_receipt(file: UploadFile = File(...)):
 
     # Read file content
     content = await file.read()
+    file_extension = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
 
-    # Extract text based on file type
-    text = extract_text_from_file(content, file.filename)
+    # Process based on file type
+    if file_extension in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
+        # Use Groq Vision for images
+        data = process_image_with_groq(content, file.filename)
+    else:
+        # Use text/PDF extraction
+        text = extract_text_from_file(content, file.filename)
 
-    # If text is empty or error message, return early
-    if not text or len(text.strip()) < 5:
-        return ExpenseResponse(
-            status="needs_review",
-            vendor="Unknown",
-            amount=0.0,
-            currency="NGN",
-            category="Other",
-            confidence=0.0,
-            filename=file.filename,
-            message=f"Could not extract text from {file.filename}. Please upload a clear image or text file."
-        )
+        # If text is empty, return early
+        if not text or len(text.strip()) < 5:
+            return ExpenseResponse(
+                status="needs_review",
+                vendor="Unknown",
+                amount=0.0,
+                currency="NGN",
+                category="Other",
+                confidence=0.0,
+                filename=file.filename,
+                message=f"Could not extract text from {file.filename}. Please upload a clear image or text file."
+            )
 
-    # Build prompt for Groq
-    prompt = f"""
-    Extract information from this receipt and return ONLY valid JSON.
+        # Build prompt for Groq (text model)
+        prompt = f"""
+        Extract information from this receipt and return ONLY valid JSON.
 
-    Receipt text:
-    {text[:1000]}
+        Receipt text:
+        {text[:1000]}
 
-    Return JSON with these exact keys:
-    - vendor: The store/business name (string)
-    - amount: The total amount as a number (float, no currency symbol)
-    - currency: The currency code (string, e.g., NGN, USD, EUR)
-    - category: Choose ONE from [Food, Transport, Office Supplies, Utilities, Entertainment, Other]
-    - confidence: Your confidence in the extraction (float between 0 and 1)
+        Return JSON with these exact keys:
+        - vendor: The store/business name (string)
+        - amount: The total amount as a number (float, no currency symbol)
+        - currency: The currency code (string, e.g., NGN, USD, EUR)
+        - category: Choose ONE from [Food, Transport, Office Supplies, Utilities, Entertainment, Other]
+        - confidence: Your confidence in the extraction (float between 0 and 1)
 
-    Example output:
-    {{"vendor":"ABC Supermarket","amount":24500.0,"currency":"NGN","category":"Office Supplies","confidence":0.95}}
+        Example output:
+        {{"vendor":"ABC Supermarket","amount":24500.0,"currency":"NGN","category":"Office Supplies","confidence":0.95}}
 
-    ONLY return the JSON. No other text.
-    """
+        ONLY return the JSON. No other text.
+        """
 
-    try:
-        # Call Groq API
-        response = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=[
-                {"role": "system", "content": "You are a receipt parsing assistant. Return only valid JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.1,
-            max_tokens=300
-        )
-
-        # Parse response
         try:
-            data = json.loads(response.choices[0].message.content)
-            print(f"✅ Parsed: {data}")
-        except json.JSONDecodeError as e:
-            print(f"❌ JSON parse error: {e}")
+            # Call Groq API (text model)
+            response = client.chat.completions.create(
+                model="openai/gpt-oss-120b",
+                messages=[
+                    {"role": "system", "content": "You are a receipt parsing assistant. Return only valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,
+                max_tokens=300
+            )
+
+            # Parse response
+            try:
+                data = json.loads(response.choices[0].message.content)
+                print(f"✅ Parsed: {data}")
+            except json.JSONDecodeError as e:
+                print(f"❌ JSON parse error: {e}")
+                data = {
+                    "vendor": "Unknown",
+                    "amount": 0.0,
+                    "currency": "NGN",
+                    "category": "Other",
+                    "confidence": 0.5
+                }
+
+        except Exception as e:
+            print(f"❌ Error calling Groq: {e}")
             data = {
                 "vendor": "Unknown",
                 "amount": 0.0,
@@ -225,16 +296,6 @@ async def process_receipt(file: UploadFile = File(...)):
                 "category": "Other",
                 "confidence": 0.5
             }
-
-    except Exception as e:
-        print(f"❌ Error calling Groq: {e}")
-        data = {
-            "vendor": "Unknown",
-            "amount": 0.0,
-            "currency": "NGN",
-            "category": "Other",
-            "confidence": 0.5
-        }
 
     # Determine status based on confidence
     status = "auto_approved" if data.get("confidence", 0) > 0.8 else "needs_review"
@@ -342,10 +403,10 @@ async def root():
     """Root endpoint with API information."""
     return {
         "name": "ProofPilot API",
-        "version": "1.1.0",
-        "description": "AI-powered expense processing agent with OCR",
+        "version": "2.0.0",
+        "description": "AI-powered expense processing agent with Groq Vision",
         "features": {
-            "ocr": OCR_AVAILABLE,
+            "vision": True,
             "pdf": PDF_AVAILABLE
         },
         "endpoints": {
@@ -365,27 +426,10 @@ async def health_check():
         "status": "healthy",
         "database": "connected",
         "groq_api": "configured" if client else "missing",
-        "ocr_available": OCR_AVAILABLE,
+        "vision": True,
         "pdf_available": PDF_AVAILABLE,
         "timestamp": datetime.now().isoformat()
     }
-
-@app.post("/test-ocr")
-async def test_ocr(file: UploadFile = File(...)):
-    """Test OCR on a file."""
-    try:
-        content = await file.read()
-        image = Image.open(io.BytesIO(content))
-        img_array = np.array(image)
-        results = reader.readtext(img_array)
-        text = ' '.join([res[1] for res in results])
-        return {
-            "ocr_text": text.strip(),
-            "length": len(text),
-            "success": len(text.strip()) > 0
-        }
-    except Exception as e:
-        return {"error": str(e), "success": False}
 
 if __name__ == "__main__":
     import uvicorn
